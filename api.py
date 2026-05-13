@@ -244,6 +244,15 @@ transform = transforms.Compose([
 ])
 
 # ─── Prediction Endpoints ─────────────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    print("Preloading models...")
+    # Preload the default text models
+    load_text_models()
+    # Preload the most common vision model
+    load_vision_model("resnet18")
+    print("Startup complete.")
+
 @app.get("/")
 async def root():
     return {"status": "online", "version": "2.0", "endpoints": ["/predict/image", "/predict/text", "/stats/vision", "/stats/text"]}
