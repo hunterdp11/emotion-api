@@ -117,7 +117,7 @@ def load_text_models(requested_model: str = None):
     return _text_cache
 
 # Use OpenCV built-in cascade path
-_cascade_path = cv2.data.haarcascades + 'haascade_frontalface_default.xml'
+_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 face_cascade = cv2.CascadeClassifier(_cascade_path)
 if face_cascade.empty():
     face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
