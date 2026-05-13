@@ -263,10 +263,7 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
 
         m = load_vision_model(model)
         if m is None:
-            m = load_vision_model("resnet18")
-            model = "resnet18"
-        if m is None:
-            return {"error": "Model weights not found on server"}
+            return {"error": f"Model '{model}' weights not found on server. Only ResNet18 is currently available."}
 
         x, y, w, h = faces[0]
         face_crop = img_np[y:y+h, x:x+w]
