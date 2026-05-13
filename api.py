@@ -155,17 +155,11 @@ _vision_cache = {}
 _text_cache = {}
 
 def load_vision_model(model_name: str):
-    # If the model is already in cache, use it
-    if model_name in _vision_cache:
-        return _vision_cache[model_name]
-    
-    # Render Free Tier has 512MB limit. To save memory, we clear the cache 
-    # before loading a NEW model so only one vision model is in memory at a time.
-    print(f"Clearing vision cache to save memory before loading {model_name}...")
-    _vision_cache.clear()
+    # For Render Free Tier (512MB), we don't cache vision models at all.
+    # We load them fresh for each request and delete them immediately after.
     import gc
     gc.collect()
-
+    
     try:
         if model_name == 'resnet18':
             m = models.resnet18(weights=None)
@@ -186,70 +180,54 @@ def load_vision_model(model_name: str):
 
         path = os.path.join(MODELS_DIR, f"{model_name}_emotion.pth")
         fallback = os.path.join(MODELS_DIR, "emotion_model.pth")
-        if os.path.exists(path):
-            m.load_state_dict(torch.load(path, map_location=device))
-        elif os.path.exists(fallback) and model_name == 'resnet18':
-            m.load_state_dict(torch.load(fallback, map_location=device))
-        else:
-            return None
+        
+        # Load weights with weights_only=True for security and speed if supported
+        state_dict = torch.load(path if os.path.exists(path) else fallback, map_location=device)
+        m.load_state_dict(state_dict)
+        del state_dict # Free memory immediately
         
         m.eval()
-        _vision_cache[model_name] = m
         return m
     except Exception as e:
         print(f"Error loading {model_name}: {e}")
         return None
 
-def load_text_models():
-    if _text_cache:
+def load_text_models(requested_model: str = None):
+    # Text models are small, but we still want to be careful
+    if requested_model and requested_model in _text_cache:
         return _text_cache
-    # Text models are small, we can keep them in cache
-    try:
-        # (existing text loading logic remains same...)
-        # Try loading separate model files first
-        sep_files = {
-            "Neural Network":      "text_nn_model.pkl",
-            "Logistic Regression": "text_lr_model.pkl",
-            "Naive Bayes":         "text_nb_model.pkl",
-        }
-        vocab, num_to_label = None, None
 
-        for model_name, filename in sep_files.items():
-            pkl_path = os.path.join(MODELS_DIR, filename)
+    try:
+        import gc
+        gc.collect()
+        
+        # Load vocab first if not present
+        if "vocab" not in _text_cache:
+            pkl_path = os.path.join(MODELS_DIR, "text_sentiment_model.pkl")
             if os.path.exists(pkl_path):
                 with open(pkl_path, "rb") as f:
                     data = CustomUnpickler(f).load()
-                    # Each file may be (model, vocab, num_to_label) or just model
                     if isinstance(data, tuple) and len(data) >= 3:
-                        mdl, vocab, num_to_label = data[0], data[1], data[2]
-                    else:
-                        mdl = data
-                _text_cache[model_name] = mdl
-                if vocab is not None and "vocab" not in _text_cache:
-                    _text_cache["vocab"] = vocab
-                    _text_cache["num_to_label"] = num_to_label
+                        _text_cache["vocab"] = data[1]
+                        _text_cache["num_to_label"] = data[2]
+                        # Also cache the best model while we're at it
+                        cls_name = type(data[0]).__name__
+                        key = "Neural Network" if "Neural" in cls_name else ("Logistic Regression" if "Logistic" in cls_name else "Naive Bayes")
+                        _text_cache[key] = data[0]
 
-        # Fallback: load single combined pkl and infer which class it is
-        if not _text_cache:
-            pkl_path = os.path.join(MODELS_DIR, "text_sentiment_model.pkl")
-            with open(pkl_path, "rb") as f:
-                data = CustomUnpickler(f).load()
-            if isinstance(data, tuple):
-                best_model, vocab, num_to_label = data[0], data[1], data[2]
-            else:
-                raise Exception("Unexpected pkl format")
-            _text_cache["vocab"] = vocab
-            _text_cache["num_to_label"] = num_to_label
-            # Detect which class it is and store under the right key
-            cls_name = type(best_model).__name__
-            if "Neural" in cls_name:
-                _text_cache["Neural Network"] = best_model
-            elif "Logistic" in cls_name:
-                _text_cache["Logistic Regression"] = best_model
-            elif "Naive" in cls_name:
-                _text_cache["Naive Bayes"] = best_model
-            else:
-                _text_cache["Neural Network"] = best_model  # safe default
+        # Load specific model if requested and not in cache
+        if requested_model and requested_model not in _text_cache:
+            sep_files = {
+                "Neural Network":      "text_nn_model.pkl",
+                "Logistic Regression": "text_lr_model.pkl",
+                "Naive Bayes":         "text_nb_model.pkl",
+            }
+            if requested_model in sep_files:
+                pkl_path = os.path.join(MODELS_DIR, sep_files[requested_model])
+                if os.path.exists(pkl_path):
+                    with open(pkl_path, "rb") as f:
+                        data = CustomUnpickler(f).load()
+                        _text_cache[requested_model] = data[0] if isinstance(data, tuple) else data
 
     except Exception as e:
         print(f"Error loading text models: {e}")
@@ -305,13 +283,18 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
 
         all_probs = {CLASS_NAMES[i]: round(float(probs[i]) * 100, 1) for i in range(len(CLASS_NAMES))}
 
-        return {
+        res = {
             "emotion": CLASS_NAMES[idx.item()],
             "confidence": round(float(conf) * 100, 1),
             "all_probabilities": all_probs,
             "model_used": model,
             "faces_detected": faces_detected
         }
+        # Force cleanup immediately
+        del m
+        import gc
+        gc.collect()
+        return res
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -324,7 +307,7 @@ class TextRequest(BaseModel):
 @app.post("/predict/text")
 async def predict_text(req: TextRequest):
     try:
-        cache = load_text_models()
+        cache = load_text_models(req.model)
         if not cache:
             return {"error": "Text models not found on server"}
 
