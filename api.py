@@ -236,7 +236,13 @@ def load_text_models():
         print(f"Error loading text models: {e}")
     return _text_cache
 
-face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+# Use OpenCV built-in cascade path (works on any system including Render)
+_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+face_cascade = cv2.CascadeClassifier(_cascade_path)
+if face_cascade.empty():
+    print("WARNING: haarcascade not found at built-in path, trying local")
+    face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -264,18 +270,21 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         img_np = np.array(image)
 
-        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-
-        if len(faces) == 0:
-            return {"error": "No face detected in image"}
+        # Face detection — falls back to whole image if cascade unavailable or no face found
+        face_crop = img_np
+        faces_detected = 0
+        if not face_cascade.empty():
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+            faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+            if len(faces) > 0:
+                x, y, w, h = faces[0]
+                face_crop = img_np[y:y+h, x:x+w]
+                faces_detected = len(faces)
 
         m = load_vision_model(model)
         if m is None:
             return {"error": f"Model '{model}' weights not found on server. Only ResNet18 is currently available."}
 
-        x, y, w, h = faces[0]
-        face_crop = img_np[y:y+h, x:x+w]
         face_pil = Image.fromarray(face_crop)
         tensor = transform(face_pil).unsqueeze(0)
 
@@ -291,10 +300,12 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
             "confidence": round(float(conf) * 100, 1),
             "all_probabilities": all_probs,
             "model_used": model,
-            "faces_detected": len(faces)
+            "faces_detected": faces_detected
         }
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        traceback.print_exc()
+        return {"error": f"Image analysis failed: {str(e)}"}
 
 class TextRequest(BaseModel):
     text: str
