@@ -148,8 +148,17 @@ _vision_cache = {}
 _text_cache = {}
 
 def load_vision_model(model_name: str):
+    # If the model is already in cache, use it
     if model_name in _vision_cache:
         return _vision_cache[model_name]
+    
+    # Render Free Tier has 512MB limit. To save memory, we clear the cache 
+    # before loading a NEW model so only one vision model is in memory at a time.
+    print(f"Clearing vision cache to save memory before loading {model_name}...")
+    _vision_cache.clear()
+    import gc
+    gc.collect()
+
     try:
         if model_name == 'resnet18':
             m = models.resnet18(weights=None)
@@ -176,6 +185,7 @@ def load_vision_model(model_name: str):
             m.load_state_dict(torch.load(fallback, map_location=device))
         else:
             return None
+        
         m.eval()
         _vision_cache[model_name] = m
         return m
@@ -186,7 +196,9 @@ def load_vision_model(model_name: str):
 def load_text_models():
     if _text_cache:
         return _text_cache
+    # Text models are small, we can keep them in cache
     try:
+        # (existing text loading logic remains same...)
         # Try loading separate model files first
         sep_files = {
             "Neural Network":      "text_nn_model.pkl",
@@ -250,15 +262,6 @@ transform = transforms.Compose([
 ])
 
 # ─── Prediction Endpoints ─────────────────────────────────────────────────────
-@app.on_event("startup")
-async def startup_event():
-    print("Preloading models...")
-    # Preload the default text models
-    load_text_models()
-    # Preload the most common vision model
-    load_vision_model("resnet18")
-    print("Startup complete.")
-
 @app.get("/")
 async def root():
     return {"status": "online", "version": "2.0", "endpoints": ["/predict/image", "/predict/text", "/stats/vision", "/stats/text"]}
