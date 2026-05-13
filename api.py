@@ -10,6 +10,7 @@ import cv2
 import pickle
 import io
 import os
+import math
 import sentiment_analyzer
 import __main__
 
@@ -186,15 +187,53 @@ def load_text_models():
     if _text_cache:
         return _text_cache
     try:
-        pkl_path = os.path.join(MODELS_DIR, "text_sentiment_model.pkl")
-        with open(pkl_path, "rb") as f:
-            best_model, vocab, num_to_label, model_name = CustomUnpickler(f).load()
-        _text_cache["vocab"] = vocab
-        _text_cache["num_to_label"] = num_to_label
-        _text_cache["best_model"] = best_model
-        _text_cache["best_model_name"] = model_name
+        # Try loading separate model files first
+        sep_files = {
+            "Neural Network":      "text_nn_model.pkl",
+            "Logistic Regression": "text_lr_model.pkl",
+            "Naive Bayes":         "text_nb_model.pkl",
+        }
+        vocab, num_to_label = None, None
+
+        for model_name, filename in sep_files.items():
+            pkl_path = os.path.join(MODELS_DIR, filename)
+            if os.path.exists(pkl_path):
+                with open(pkl_path, "rb") as f:
+                    data = CustomUnpickler(f).load()
+                    # Each file may be (model, vocab, num_to_label) or just model
+                    if isinstance(data, tuple) and len(data) >= 3:
+                        mdl, vocab, num_to_label = data[0], data[1], data[2]
+                    else:
+                        mdl = data
+                _text_cache[model_name] = mdl
+                if vocab is not None and "vocab" not in _text_cache:
+                    _text_cache["vocab"] = vocab
+                    _text_cache["num_to_label"] = num_to_label
+
+        # Fallback: load single combined pkl and infer which class it is
+        if not _text_cache:
+            pkl_path = os.path.join(MODELS_DIR, "text_sentiment_model.pkl")
+            with open(pkl_path, "rb") as f:
+                data = CustomUnpickler(f).load()
+            if isinstance(data, tuple):
+                best_model, vocab, num_to_label = data[0], data[1], data[2]
+            else:
+                raise Exception("Unexpected pkl format")
+            _text_cache["vocab"] = vocab
+            _text_cache["num_to_label"] = num_to_label
+            # Detect which class it is and store under the right key
+            cls_name = type(best_model).__name__
+            if "Neural" in cls_name:
+                _text_cache["Neural Network"] = best_model
+            elif "Logistic" in cls_name:
+                _text_cache["Logistic Regression"] = best_model
+            elif "Naive" in cls_name:
+                _text_cache["Naive Bayes"] = best_model
+            else:
+                _text_cache["Neural Network"] = best_model  # safe default
+
     except Exception as e:
-        print(f"Error loading text model: {e}")
+        print(f"Error loading text models: {e}")
     return _text_cache
 
 face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
@@ -224,7 +263,6 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
 
         m = load_vision_model(model)
         if m is None:
-            # Fallback to resnet18
             m = load_vision_model("resnet18")
             model = "resnet18"
         if m is None:
@@ -261,40 +299,79 @@ async def predict_text(req: TextRequest):
     try:
         cache = load_text_models()
         if not cache:
-            return {"error": "Text model not found on server"}
+            return {"error": "Text models not found on server"}
 
-        vocab = cache["vocab"]
-        num_to_label = cache["num_to_label"]
-        best_model = cache["best_model"]
+        vocab        = cache.get("vocab")
+        num_to_label = cache.get("num_to_label")
+
+        if vocab is None or num_to_label is None:
+            return {"error": "Vocabulary not loaded"}
 
         clean = sentiment_analyzer.preprocess(req.text)
-        vec = sentiment_analyzer.vectorize(clean, vocab)
+        vec   = sentiment_analyzer.vectorize(clean, vocab)
 
-        if req.model == "Neural Network":
-            pred_num = best_model.predict([vec])[0]
+        model_key = req.model  # "Neural Network", "Logistic Regression", or "Naive Bayes"
+
+        # Pick model — cascade down if not available
+        mdl = cache.get(model_key)
+        if mdl is None:
+            mdl = cache.get("Neural Network")
+            model_key = "Neural Network"
+        if mdl is None:
+            return {"error": f"Model '{req.model}' not available"}
+
+        cls_name = type(mdl).__name__
+
+        # ── Neural Network ──────────────────────────────────────────────────
+        if "Neural" in cls_name:
+            pred_num = mdl.predict([vec])[0]
             sentiment = num_to_label[pred_num]
-            a1 = sentiment_analyzer.relu([sum(w*xi for w, xi in zip(ws, vec)) + b for ws, b in zip(best_model.W1, best_model.b1)])
-            z2 = [sum(w*ai for w, ai in zip(ws, a1)) + b for ws, b in zip(best_model.W2, best_model.b2)]
-            probs = sentiment_analyzer.softmax(z2)
-            all_probs = {num_to_label[i]: round(probs[i] * 100, 1) for i in range(3)}
-            conf = round(probs[pred_num] * 100, 1)
-        elif req.model == "Logistic Regression":
-            pred_num = best_model.predict([vec])[0]
+            a1 = sentiment_analyzer.relu(
+                [sum(w*xi for w, xi in zip(ws, vec)) + b for ws, b in zip(mdl.W1, mdl.b1)]
+            )
+            z2 = [sum(w*ai for w, ai in zip(ws, a1)) + b for ws, b in zip(mdl.W2, mdl.b2)]
+            probs    = sentiment_analyzer.softmax(z2)
+            all_probs = {num_to_label[i]: round(probs[i] * 100, 1) for i in range(len(num_to_label))}
+            conf     = round(probs[pred_num] * 100, 1)
+
+        # ── Logistic Regression ─────────────────────────────────────────────
+        elif "Logistic" in cls_name:
+            pred_num = mdl.predict([vec])[0]
             sentiment = num_to_label[pred_num]
-            scores = [sum(w*xi for w, xi in zip(ws, vec)) + b for ws, b in zip(best_model.W, best_model.b)]
-            probs = sentiment_analyzer.softmax(scores)
-            all_probs = {num_to_label[i]: round(probs[i] * 100, 1) for i in range(3)}
-            conf = round(probs[pred_num] * 100, 1)
+            scores = [
+                sum(w*xi for w, xi in zip(mdl.W[c], vec)) + mdl.b[c]
+                for c in range(len(num_to_label))
+            ]
+            probs     = sentiment_analyzer.softmax(scores)
+            all_probs = {num_to_label[i]: round(probs[i] * 100, 1) for i in range(len(num_to_label))}
+            conf      = round(probs[pred_num] * 100, 1)
+
+        # ── Naive Bayes ─────────────────────────────────────────────────────
         else:
-            sentiment = best_model.predict(vec)
-            conf = 95.0
-            all_probs = {sentiment: 95.0}
+            # NaiveBayes.predict takes a single vector, not a list of vectors
+            sentiment = mdl.predict(vec)
+            # Compute per-class log probs for probability breakdown
+            total_docs = sum(mdl.class_counts.values())
+            scores = {}
+            for label in mdl.class_counts:
+                log_p = math.log(mdl.class_counts[label] / total_docs)
+                total_words = sum(mdl.class_word_counts[label])
+                for i, cnt in enumerate(vec):
+                    prob = (mdl.class_word_counts[label][i] + 1) / (total_words + mdl.vocab_size)
+                    log_p += cnt * math.log(prob)
+                scores[label] = log_p
+            # Convert log scores to rough softmax probabilities
+            min_score = min(scores.values())
+            exp_scores = {k: math.exp(v - min_score) for k, v in scores.items()}
+            total_exp  = sum(exp_scores.values())
+            all_probs  = {k: round(v / total_exp * 100, 1) for k, v in exp_scores.items()}
+            conf       = all_probs.get(sentiment, 90.0)
 
         return {
-            "sentiment": sentiment,
-            "confidence": conf,
+            "sentiment":        sentiment,
+            "confidence":       conf,
             "all_probabilities": all_probs,
-            "model_used": req.model
+            "model_used":       model_key
         }
     except Exception as e:
         return {"error": str(e)}
