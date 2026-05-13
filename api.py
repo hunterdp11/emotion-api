@@ -1,15 +1,7 @@
-import os
-# Limit threads to save memory on Render Free Tier
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import torch
-# Limit Torch threads
-torch.set_num_threads(1)
-
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
@@ -17,6 +9,7 @@ import numpy as np
 import cv2
 import pickle
 import io
+import os
 import math
 import sentiment_analyzer
 import __main__
@@ -48,117 +41,13 @@ device = torch.device("cpu")
 CLASS_NAMES = ['angry', 'fear', 'happy', 'neutral', 'sad', 'surprise']
 MODELS_DIR = "models"
 
-# ─── Pre-computed Stats (based on your trained models) ────────────────────────
-VISION_STATS = {
-    "resnet18": {
-        "accuracy": 72.4,
-        "params": "11.7M",
-        "type": "Transfer Learning",
-        "per_class_accuracy": {
-            "angry": 68.2, "fear": 61.5, "happy": 89.3,
-            "neutral": 74.1, "sad": 63.8, "surprise": 77.6
-        },
-        "confusion_matrix": [
-            [45, 3, 2, 4, 8, 1],
-            [4, 32, 1, 5, 7, 3],
-            [1, 0, 74, 2, 0, 6],
-            [3, 2, 3, 61, 4, 1],
-            [6, 5, 1, 4, 42, 1],
-            [2, 1, 4, 1, 2, 51]
-        ]
-    },
-    "mobilenet_v2": {
-        "accuracy": 69.8,
-        "params": "3.5M",
-        "type": "Transfer Learning",
-        "per_class_accuracy": {
-            "angry": 65.1, "fear": 58.9, "happy": 87.2,
-            "neutral": 71.4, "sad": 60.3, "surprise": 76.0
-        },
-        "confusion_matrix": [
-            [43, 4, 2, 5, 8, 1],
-            [5, 30, 2, 6, 7, 2],
-            [2, 1, 72, 3, 0, 5],
-            [4, 3, 3, 59, 4, 1],
-            [7, 6, 2, 4, 39, 1],
-            [3, 1, 4, 2, 2, 50]
-        ]
-    },
-    "efficientnet_b0": {
-        "accuracy": 74.1,
-        "params": "5.3M",
-        "type": "Transfer Learning",
-        "per_class_accuracy": {
-            "angry": 70.5, "fear": 63.2, "happy": 90.1,
-            "neutral": 75.8, "sad": 65.4, "surprise": 79.6
-        },
-        "confusion_matrix": [
-            [46, 2, 2, 4, 7, 2],
-            [3, 33, 1, 5, 7, 3],
-            [1, 0, 75, 2, 0, 5],
-            [3, 2, 2, 62, 4, 1],
-            [5, 5, 1, 4, 43, 1],
-            [2, 1, 3, 1, 2, 52]
-        ]
-    },
-    "custom_cnn": {
-        "accuracy": 65.3,
-        "params": "26.0M",
-        "type": "Trained from Scratch",
-        "per_class_accuracy": {
-            "angry": 60.2, "fear": 54.8, "happy": 82.5,
-            "neutral": 67.3, "sad": 55.9, "surprise": 71.1
-        },
-        "confusion_matrix": [
-            [40, 5, 3, 6, 8, 1],
-            [6, 28, 2, 7, 7, 2],
-            [2, 1, 68, 4, 1, 7],
-            [5, 4, 3, 55, 5, 2],
-            [8, 7, 2, 5, 37, 2],
-            [3, 2, 5, 2, 3, 47]
-        ]
-    }
-}
-
-TEXT_STATS = {
-    "Neural Network": {
-        "accuracy": 88.5,
-        "precision": 87.9,
-        "recall": 88.2,
-        "f1_score": 88.0,
-        "type": "Scratch Neural Network",
-        "confusion_matrix": [[82, 5, 3], [4, 79, 7], [2, 6, 91]],
-        "per_class_accuracy": {"negative": 91.2, "neutral": 87.8, "positive": 86.6}
-    },
-    "Logistic Regression": {
-        "accuracy": 84.2,
-        "precision": 83.7,
-        "recall": 84.0,
-        "f1_score": 83.8,
-        "type": "Scratch Logistic Regression",
-        "confusion_matrix": [[78, 8, 4], [6, 74, 10], [3, 9, 87]],
-        "per_class_accuracy": {"negative": 87.6, "neutral": 82.2, "positive": 82.9}
-    },
-    "Naive Bayes": {
-        "accuracy": 79.6,
-        "precision": 79.1,
-        "recall": 79.4,
-        "f1_score": 79.2,
-        "type": "Scratch Naive Bayes",
-        "confusion_matrix": [[74, 11, 5], [8, 70, 12], [5, 12, 82]],
-        "per_class_accuracy": {"negative": 82.2, "neutral": 77.8, "positive": 79.0}
-    }
-}
-
-# ─── Model Loaders ────────────────────────────────────────────────────────────
+# ─── Model Loaders (High Performance Mode) ───────────────────────────────────
 _vision_cache = {}
 _text_cache = {}
 
 def load_vision_model(model_name: str):
-    # For Render Free Tier (512MB), we don't cache vision models at all.
-    # We load them fresh for each request and delete them immediately after.
-    import gc
-    gc.collect()
+    if model_name in _vision_cache:
+        return _vision_cache[model_name]
     
     try:
         if model_name == 'resnet18':
@@ -181,26 +70,21 @@ def load_vision_model(model_name: str):
         path = os.path.join(MODELS_DIR, f"{model_name}_emotion.pth")
         fallback = os.path.join(MODELS_DIR, "emotion_model.pth")
         
-        # Load weights with weights_only=True for security and speed if supported
         state_dict = torch.load(path if os.path.exists(path) else fallback, map_location=device)
         m.load_state_dict(state_dict)
-        del state_dict # Free memory immediately
         
         m.eval()
+        _vision_cache[model_name] = m
         return m
     except Exception as e:
         print(f"Error loading {model_name}: {e}")
         return None
 
 def load_text_models(requested_model: str = None):
-    # Text models are small, but we still want to be careful
     if requested_model and requested_model in _text_cache:
         return _text_cache
 
     try:
-        import gc
-        gc.collect()
-        
         # Load vocab first if not present
         if "vocab" not in _text_cache:
             pkl_path = os.path.join(MODELS_DIR, "text_sentiment_model.pkl")
@@ -210,12 +94,11 @@ def load_text_models(requested_model: str = None):
                     if isinstance(data, tuple) and len(data) >= 3:
                         _text_cache["vocab"] = data[1]
                         _text_cache["num_to_label"] = data[2]
-                        # Also cache the best model while we're at it
                         cls_name = type(data[0]).__name__
                         key = "Neural Network" if "Neural" in cls_name else ("Logistic Regression" if "Logistic" in cls_name else "Naive Bayes")
                         _text_cache[key] = data[0]
 
-        # Load specific model if requested and not in cache
+        # Load specific model if requested
         if requested_model and requested_model not in _text_cache:
             sep_files = {
                 "Neural Network":      "text_nn_model.pkl",
@@ -233,11 +116,10 @@ def load_text_models(requested_model: str = None):
         print(f"Error loading text models: {e}")
     return _text_cache
 
-# Use OpenCV built-in cascade path (works on any system including Render)
-_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+# Use OpenCV built-in cascade path
+_cascade_path = cv2.data.haarcascades + 'haascade_frontalface_default.xml'
 face_cascade = cv2.CascadeClassifier(_cascade_path)
 if face_cascade.empty():
-    print("WARNING: haarcascade not found at built-in path, trying local")
     face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
 
 transform = transforms.Compose([
@@ -247,9 +129,16 @@ transform = transforms.Compose([
 ])
 
 # ─── Prediction Endpoints ─────────────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    print("Preloading models for GCP high-performance...")
+    load_text_models("Neural Network")
+    load_vision_model("resnet18")
+    print("All core models preloaded.")
+
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "2.0", "endpoints": ["/predict/image", "/predict/text", "/stats/vision", "/stats/text"]}
+    return {"status": "online", "version": "2.0-GCP", "endpoints": ["/predict/image", "/predict/text", "/stats/vision", "/stats/text"]}
 
 @app.post("/predict/image")
 async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
@@ -258,7 +147,6 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         img_np = np.array(image)
 
-        # Face detection — falls back to whole image if cascade unavailable or no face found
         face_crop = img_np
         faces_detected = 0
         if not face_cascade.empty():
@@ -271,7 +159,7 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
 
         m = load_vision_model(model)
         if m is None:
-            return {"error": f"Model '{model}' weights not found on server. Only ResNet18 is currently available."}
+            return {"error": f"Model '{model}' weights not found."}
 
         face_pil = Image.fromarray(face_crop)
         tensor = transform(face_pil).unsqueeze(0)
@@ -283,21 +171,14 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
 
         all_probs = {CLASS_NAMES[i]: round(float(probs[i]) * 100, 1) for i in range(len(CLASS_NAMES))}
 
-        res = {
+        return {
             "emotion": CLASS_NAMES[idx.item()],
             "confidence": round(float(conf) * 100, 1),
             "all_probabilities": all_probs,
             "model_used": model,
             "faces_detected": faces_detected
         }
-        # Force cleanup immediately
-        del m
-        import gc
-        gc.collect()
-        return res
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return {"error": f"Image analysis failed: {str(e)}"}
 
 class TextRequest(BaseModel):
@@ -309,58 +190,39 @@ async def predict_text(req: TextRequest):
     try:
         cache = load_text_models(req.model)
         if not cache:
-            return {"error": "Text models not found on server"}
+            return {"error": "Text models not found"}
 
-        vocab        = cache.get("vocab")
+        vocab = cache.get("vocab")
         num_to_label = cache.get("num_to_label")
 
         if vocab is None or num_to_label is None:
             return {"error": "Vocabulary not loaded"}
 
         clean = sentiment_analyzer.preprocess(req.text)
-        vec   = sentiment_analyzer.vectorize(clean, vocab)
+        vec = sentiment_analyzer.vectorize(clean, vocab)
 
-        model_key = req.model  # "Neural Network", "Logistic Regression", or "Naive Bayes"
-
-        # Pick model — cascade down if not available
-        mdl = cache.get(model_key)
-        if mdl is None:
-            mdl = cache.get("Neural Network")
-            model_key = "Neural Network"
-        if mdl is None:
-            return {"error": f"Model '{req.model}' not available"}
-
+        model_key = req.model
+        mdl = cache.get(model_key) or cache.get("Neural Network")
+        
         cls_name = type(mdl).__name__
 
-        # ── Neural Network ──────────────────────────────────────────────────
         if "Neural" in cls_name:
             pred_num = mdl.predict([vec])[0]
             sentiment = num_to_label[pred_num]
-            a1 = sentiment_analyzer.relu(
-                [sum(w*xi for w, xi in zip(ws, vec)) + b for ws, b in zip(mdl.W1, mdl.b1)]
-            )
+            a1 = sentiment_analyzer.relu([sum(w*xi for w, xi in zip(ws, vec)) + b for ws, b in zip(mdl.W1, mdl.b1)])
             z2 = [sum(w*ai for w, ai in zip(ws, a1)) + b for ws, b in zip(mdl.W2, mdl.b2)]
-            probs    = sentiment_analyzer.softmax(z2)
+            probs = sentiment_analyzer.softmax(z2)
             all_probs = {num_to_label[i]: round(probs[i] * 100, 1) for i in range(len(num_to_label))}
-            conf     = round(probs[pred_num] * 100, 1)
-
-        # ── Logistic Regression ─────────────────────────────────────────────
+            conf = round(probs[pred_num] * 100, 1)
         elif "Logistic" in cls_name:
             pred_num = mdl.predict([vec])[0]
             sentiment = num_to_label[pred_num]
-            scores = [
-                sum(w*xi for w, xi in zip(mdl.W[c], vec)) + mdl.b[c]
-                for c in range(len(num_to_label))
-            ]
-            probs     = sentiment_analyzer.softmax(scores)
+            scores = [sum(w*xi for w, xi in zip(mdl.W[c], vec)) + mdl.b[c] for c in range(len(num_to_label))]
+            probs = sentiment_analyzer.softmax(scores)
             all_probs = {num_to_label[i]: round(probs[i] * 100, 1) for i in range(len(num_to_label))}
-            conf      = round(probs[pred_num] * 100, 1)
-
-        # ── Naive Bayes ─────────────────────────────────────────────────────
+            conf = round(probs[pred_num] * 100, 1)
         else:
-            # NaiveBayes.predict takes a single vector, not a list of vectors
             sentiment = mdl.predict(vec)
-            # Compute per-class log probs for probability breakdown
             total_docs = sum(mdl.class_counts.values())
             scores = {}
             for label in mdl.class_counts:
@@ -370,41 +232,17 @@ async def predict_text(req: TextRequest):
                     prob = (mdl.class_word_counts[label][i] + 1) / (total_words + mdl.vocab_size)
                     log_p += cnt * math.log(prob)
                 scores[label] = log_p
-            # Convert log scores to rough softmax probabilities
             min_score = min(scores.values())
             exp_scores = {k: math.exp(v - min_score) for k, v in scores.items()}
-            total_exp  = sum(exp_scores.values())
-            all_probs  = {k: round(v / total_exp * 100, 1) for k, v in exp_scores.items()}
-            conf       = all_probs.get(sentiment, 90.0)
+            total_exp = sum(exp_scores.values())
+            all_probs = {k: round(v / total_exp * 100, 1) for k, v in exp_scores.items()}
+            conf = all_probs.get(sentiment, 90.0)
 
         return {
-            "sentiment":        sentiment,
-            "confidence":       conf,
+            "sentiment": sentiment,
+            "confidence": conf,
             "all_probabilities": all_probs,
-            "model_used":       model_key
+            "model_used": model_key
         }
     except Exception as e:
         return {"error": str(e)}
-
-# ─── Stats Endpoints ──────────────────────────────────────────────────────────
-@app.get("/stats/vision")
-async def get_vision_stats():
-    return {"models": VISION_STATS, "class_names": CLASS_NAMES}
-
-@app.get("/stats/text")
-async def get_text_stats():
-    return {"models": TEXT_STATS, "class_names": ["negative", "neutral", "positive"]}
-
-@app.get("/models/vision")
-async def list_vision_models():
-    available = []
-    for model_name in ["resnet18", "mobilenet_v2", "efficientnet_b0", "custom_cnn"]:
-        path = os.path.join(MODELS_DIR, f"{model_name}_emotion.pth")
-        fallback = os.path.join(MODELS_DIR, "emotion_model.pth")
-        exists = os.path.exists(path) or (model_name == "resnet18" and os.path.exists(fallback))
-        available.append({"name": model_name, "available": exists, "stats": VISION_STATS.get(model_name, {})})
-    return {"models": available}
-
-@app.get("/models/text")
-async def list_text_models():
-    return {"models": ["Neural Network", "Logistic Regression", "Naive Bayes"]}
