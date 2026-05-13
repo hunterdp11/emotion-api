@@ -1,7 +1,15 @@
+import os
+# Limit threads to save memory on Render Free Tier
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import torch
+# Limit Torch threads
+torch.set_num_threads(1)
+
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
@@ -9,7 +17,6 @@ import numpy as np
 import cv2
 import pickle
 import io
-import os
 import math
 import sentiment_analyzer
 import __main__
