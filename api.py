@@ -11,8 +11,37 @@ import pickle
 import io
 import os
 import math
+from datetime import datetime, timezone
 import sentiment_analyzer
 import __main__
+
+# ─── Firebase Admin ────────────────────────────────────────────────────────────
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore as fs_admin
+    _cred_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "firebase_credentials.json")
+    if not firebase_admin._apps and os.path.exists(_cred_path):
+        firebase_admin.initialize_app(credentials.Certificate(_cred_path))
+        _db = fs_admin.client()
+        print("[Firebase] Firestore connected.")
+    elif firebase_admin._apps:
+        _db = fs_admin.client()
+    else:
+        _db = None
+        print("[Firebase] firebase_credentials.json not found — logging disabled.")
+except Exception as _e:
+    _db = None
+    print(f"[Firebase] Init failed: {_e}")
+
+def _log_to_firestore(collection: str, data: dict):
+    """Fire-and-forget Firestore write. Never crashes the API."""
+    if _db is None:
+        return
+    try:
+        data["timestamp"] = fs_admin.SERVER_TIMESTAMP
+        _db.collection(collection).add(data)
+    except Exception as e:
+        print(f"[Firebase] Write error: {e}")
 
 # ─── Pickle compatibility ──────────────────────────────────────────────────────
 __main__.NaiveBayes = sentiment_analyzer.NaiveBayes
@@ -136,6 +165,39 @@ async def startup_event():
     load_vision_model("resnet18")
     print("All core models preloaded.")
 
+@app.get("/logs")
+async def get_logs(limit: int = 50):
+    """Return latest emotion + sentiment logs from Firestore."""
+    if _db is None:
+        return {"error": "Firebase not configured on server."}
+    try:
+        emotion_docs = (
+            _db.collection("emotion_logs")
+            .order_by("timestamp", direction=fs_admin.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        sentiment_docs = (
+            _db.collection("sentiment_logs")
+            .order_by("timestamp", direction=fs_admin.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        def _serialize(doc):
+            d = doc.to_dict()
+            if d.get("timestamp"):
+                try:
+                    d["timestamp"] = d["timestamp"].strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    d["timestamp"] = str(d["timestamp"])
+            return d
+        return {
+            "emotion_logs":   [_serialize(d) for d in emotion_docs],
+            "sentiment_logs": [_serialize(d) for d in sentiment_docs],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/")
 async def root():
     return {"status": "online", "version": "2.0-GCP", "endpoints": ["/predict/image", "/predict/text", "/stats/vision", "/stats/text"]}
@@ -156,6 +218,8 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
                 x, y, w, h = faces[0]
                 face_crop = img_np[y:y+h, x:x+w]
                 faces_detected = len(faces)
+            else:
+                return {"error": "No human faces found in the image. Please try another."}
 
         m = load_vision_model(model)
         if m is None:
@@ -171,13 +235,22 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
 
         all_probs = {CLASS_NAMES[i]: round(float(probs[i]) * 100, 1) for i in range(len(CLASS_NAMES))}
 
-        return {
+        result = {
             "emotion": CLASS_NAMES[idx.item()],
             "confidence": round(float(conf) * 100, 1),
             "all_probabilities": all_probs,
             "model_used": model,
-            "faces_detected": faces_detected
+            "faces_detected": faces_detected,
         }
+        # Log to Firestore (fire-and-forget)
+        _log_to_firestore("emotion_logs", {
+            "emotion":        result["emotion"],
+            "confidence":     result["confidence"],
+            "model_used":     model,
+            "faces_detected": faces_detected,
+            "source":         "mobile_app",
+        })
+        return result
     except Exception as e:
         return {"error": f"Image analysis failed: {str(e)}"}
 
@@ -238,11 +311,20 @@ async def predict_text(req: TextRequest):
             all_probs = {k: round(v / total_exp * 100, 1) for k, v in exp_scores.items()}
             conf = all_probs.get(sentiment, 90.0)
 
-        return {
-            "sentiment": sentiment,
-            "confidence": conf,
+        result = {
+            "sentiment":        sentiment,
+            "confidence":       conf,
             "all_probabilities": all_probs,
-            "model_used": model_key
+            "model_used":       model_key,
         }
+        # Log to Firestore (fire-and-forget)
+        _log_to_firestore("sentiment_logs", {
+            "sentiment":   sentiment,
+            "confidence":  conf,
+            "model_used":  model_key,
+            "text_length": len(req.text),
+            "source":      "mobile_app",
+        })
+        return result
     except Exception as e:
         return {"error": str(e)}
