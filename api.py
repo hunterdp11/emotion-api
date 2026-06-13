@@ -146,7 +146,7 @@ def load_text_models(requested_model: str = None):
     return _text_cache
 
 # Use OpenCV built-in cascade path
-_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml'
 face_cascade = cv2.CascadeClassifier(_cascade_path)
 if face_cascade.empty():
     face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
@@ -213,8 +213,8 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
             return {"error": "Face detection module failed to load on server."}
 
         gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        # Stricter parameters to prevent false positives on random background objects
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=8, minSize=(60, 60))
+        # Ultra-strict parameters (alt2 cascade + minNeighbors=10) to completely prevent hands being detected as faces
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=10, minSize=(80, 80))
         
         if len(faces) == 0:
             return {"error": "No human faces found in the image. Please try another."}
