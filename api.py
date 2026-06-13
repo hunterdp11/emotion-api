@@ -209,17 +209,19 @@ async def predict_image(file: UploadFile = File(...), model: str = "resnet18"):
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         img_np = np.array(image)
 
-        face_crop = img_np
-        faces_detected = 0
-        if not face_cascade.empty():
-            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-            faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-            if len(faces) > 0:
-                x, y, w, h = faces[0]
-                face_crop = img_np[y:y+h, x:x+w]
-                faces_detected = len(faces)
-            else:
-                return {"error": "No human faces found in the image. Please try another."}
+        if face_cascade.empty():
+            return {"error": "Face detection module failed to load on server."}
+
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        # Stricter parameters to prevent false positives on random background objects
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=8, minSize=(60, 60))
+        
+        if len(faces) == 0:
+            return {"error": "No human faces found in the image. Please try another."}
+            
+        x, y, w, h = faces[0]
+        face_crop = img_np[y:y+h, x:x+w]
+        faces_detected = len(faces)
 
         m = load_vision_model(model)
         if m is None:
